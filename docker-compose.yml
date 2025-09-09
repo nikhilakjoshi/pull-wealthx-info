@@ -1,0 +1,53 @@
+version: "3.8"
+
+services:
+  wealthx-puller:
+    build: .
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/
+      - WEALTHX_API_KEY=${WEALTHX_API_KEY}
+      - WEALTHX_API_SECRET=${WEALTHX_API_SECRET}
+      - BATCH_SIZE=${BATCH_SIZE:-12000}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./logs:/app/logs
+      - ./progress.json:/app/progress.json
+    depends_on:
+      - mongodb
+    networks:
+      - wealthx-network
+
+  mongodb:
+    image: mongo:7.0
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_ROOT_USERNAME:-admin}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD:-password}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - wealthx-network
+
+  scheduler:
+    build: .
+    command: ["python", "scheduler.py"]
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/
+      - WEALTHX_API_KEY=${WEALTHX_API_KEY}
+      - WEALTHX_API_SECRET=${WEALTHX_API_SECRET}
+      - BATCH_SIZE=${BATCH_SIZE:-12000}
+      - DAILY_RUNS=${DAILY_RUNS:-3}
+    volumes:
+      - ./logs:/app/logs
+      - ./progress.json:/app/progress.json
+    depends_on:
+      - mongodb
+    networks:
+      - wealthx-network
+
+volumes:
+  mongodb_data:
+
+networks:
+  wealthx-network:

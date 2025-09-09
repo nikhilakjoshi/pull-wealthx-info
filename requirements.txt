@@ -1,0 +1,8 @@
+pymongo
+requests
+python-dotenv
+tenacity
+click
+schedule
+tqdm
+logging-utilities
