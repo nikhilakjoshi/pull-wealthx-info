@@ -42,8 +42,8 @@ echo "⚙️  Validating configuration..."
 python test_setup.py || {
     echo "❌ Configuration validation failed"
     echo "   Please check your .env file and ensure:"
-    echo "   1. WEALTHX_API_KEY is set with your actual API key"
-    echo "   2. WEALTHX_API_SECRET is set with your actual API secret"
+    echo "   1. WEALTHX_USERNAME is set with your actual username"
+    echo "   2. WEALTHX_PASSWORD is set with your actual password"
     echo "   3. MongoDB is running and accessible"
     exit 1
 }

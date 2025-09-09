@@ -59,12 +59,12 @@ def get_batch_schedule(
 
 def validate_environment() -> Dict[str, Any]:
     """Validate environment configuration"""
-    required_vars = ["WEALTHX_API_KEY", "WEALTHX_API_SECRET"]
+    required_vars = ["WEALTHX_USERNAME", "WEALTHX_PASSWORD"]
     optional_vars = {
-        "WEALTHX_API_URL": "https://api.wealthx.com/v1/",
+        "WEALTHX_API_URL": "https://connect.wealthx.com/rest/v1/",
         "MONGO_URI": "mongodb://localhost:27017/",
         "MONGO_DATABASE": "wealthx_data",
-        "MONGO_COLLECTION": "profiles",
+        "MONGO_COLLECTION": "dossiers",
         "BATCH_SIZE": str(DEFAULT_CONFIG["batch_size"]),
         "MAX_RETRIES": str(DEFAULT_CONFIG["max_retries"]),
         "RETRY_DELAY": str(DEFAULT_CONFIG["retry_delay"]),

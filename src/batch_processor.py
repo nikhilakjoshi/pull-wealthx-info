@@ -42,37 +42,45 @@ class BatchProcessor:
         self.logger.info("All service connections validated")
         return True
 
-    def process_batch(self, offset: int, batch_size: Optional[int] = None) -> Dict:
-        """Process a single batch of records"""
+    def process_batch(self, from_index: int, batch_size: Optional[int] = None) -> Dict:
+        """Process a single batch of records using fromIndex/toIndex"""
         batch_size = batch_size or self.batch_size
+        to_index = from_index + batch_size - 1
 
         try:
             # Fetch data from WealthX API
-            profiles = self.wealthx_client.get_profiles_batch(offset, batch_size)
+            dossiers = self.wealthx_client.get_profiles_batch(from_index, to_index)
 
-            if not profiles:
-                self.logger.warning(f"No profiles returned for offset {offset}")
+            if not dossiers:
+                self.logger.warning(
+                    f"No dossiers returned for range {from_index}-{to_index}"
+                )
                 return {"success": False, "records": 0, "error": "No data returned"}
 
             # Store in MongoDB
-            result = self.mongo_client.bulk_upsert_profiles(profiles)
+            result = self.mongo_client.bulk_upsert_profiles(dossiers)
 
-            # Update progress
-            last_id = profiles[-1].get("id") if profiles else None
-            self.progress_tracker.update_progress(offset, len(profiles), last_id)
+            # Update progress - use the highest ID from the batch for resume capability
+            last_id = max(
+                (d.get("ID", 0) for d in dossiers if d.get("ID")), default=None
+            )
+            self.progress_tracker.update_progress(from_index, len(dossiers), last_id)
 
             return {
                 "success": True,
-                "records": len(profiles),
+                "records": len(dossiers),
                 "inserted": result["inserted"],
                 "updated": result["updated"],
                 "errors": result["errors"],
+                "last_id": last_id,
             }
 
         except Exception as e:
-            error_msg = f"Error processing batch at offset {offset}: {str(e)}"
+            error_msg = (
+                f"Error processing batch from {from_index} to {to_index}: {str(e)}"
+            )
             self.logger.error(error_msg)
-            self.progress_tracker.log_error(error_msg, offset)
+            self.progress_tracker.log_error(error_msg, from_index)
             return {"success": False, "records": 0, "error": str(e)}
 
     def run_full_sync(
@@ -90,16 +98,21 @@ class BatchProcessor:
             total_records = self.wealthx_client.get_total_records()
             self.logger.info(f"Total records available: {total_records:,}")
 
-            # Determine starting offset
-            start_offset = self.progress_tracker.get_resume_offset() if resume else 0
-            if start_offset > 0:
-                self.logger.info(f"Resuming from offset: {start_offset:,}")
+            # Determine starting index (WealthX uses 1-based indexing)
+            if resume:
+                last_id = self.mongo_client.get_latest_wealthx_id()
+                start_index = (last_id + 1) if last_id else 1
+            else:
+                start_index = 1
+
+            if start_index > 1:
+                self.logger.info(f"Resuming from index: {start_index:,}")
 
             # Calculate batches needed
-            remaining_records = total_records - start_offset
-            estimated_batches = (
-                remaining_records + self.batch_size - 1
-            ) // self.batch_size
+            remaining_records = total_records - start_index + 1
+            estimated_batches = max(
+                1, (remaining_records + self.batch_size - 1) // self.batch_size
+            )
 
             if max_batches:
                 estimated_batches = min(estimated_batches, max_batches)
@@ -112,19 +125,19 @@ class BatchProcessor:
             total_errors = 0
 
             with tqdm(total=estimated_batches, desc="Processing batches") as pbar:
-                current_offset = start_offset
+                current_index = start_index
                 batch_count = 0
 
-                while current_offset < total_records and (
+                while current_index <= total_records and (
                     not max_batches or batch_count < max_batches
                 ):
                     # Calculate batch size (may be smaller for last batch)
                     current_batch_size = min(
-                        self.batch_size, total_records - current_offset
+                        self.batch_size, total_records - current_index + 1
                     )
 
                     # Process batch
-                    result = self.process_batch(current_offset, current_batch_size)
+                    result = self.process_batch(current_index, current_batch_size)
 
                     if result["success"]:
                         total_processed += result["records"]
@@ -132,6 +145,7 @@ class BatchProcessor:
                             {
                                 "Processed": f"{total_processed:,}",
                                 "Errors": total_errors,
+                                "LastID": result.get("last_id", "N/A"),
                                 "ETA": self.progress_tracker.calculate_eta(
                                     total_records, self.batch_size
                                 )
@@ -145,7 +159,7 @@ class BatchProcessor:
                         # Wait before retrying or continuing
                         time.sleep(self.retry_delay)
 
-                    current_offset += current_batch_size
+                    current_index += current_batch_size
                     batch_count += 1
                     pbar.update(1)
 

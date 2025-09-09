@@ -26,7 +26,7 @@ class ProgressTracker:
             self.logger.warning(f"Could not load progress file: {e}")
 
         return {
-            "last_offset": 0,
+            "last_index": 1,  # WealthX uses 1-based indexing
             "last_wealthx_id": None,
             "total_processed": 0,
             "last_batch_time": None,
@@ -51,17 +51,17 @@ class ProgressTracker:
         self._save_progress()
         return session_id
 
-    def get_resume_offset(self) -> int:
-        """Get the offset to resume from"""
-        return self.progress_data.get("last_offset", 0)
+    def get_resume_index(self) -> int:
+        """Get the index to resume from (1-based)"""
+        return self.progress_data.get("last_index", 1)
 
     def update_progress(
-        self, offset: int, batch_size: int, wealthx_id: Optional[str] = None
+        self, current_index: int, batch_size: int, wealthx_id: Optional[int] = None
     ):
         """Update progress after successful batch"""
         self.progress_data.update(
             {
-                "last_offset": offset + batch_size,
+                "last_index": current_index + batch_size,
                 "last_wealthx_id": wealthx_id,
                 "total_processed": self.progress_data["total_processed"] + batch_size,
                 "last_batch_time": datetime.utcnow().isoformat(),
@@ -75,12 +75,12 @@ class ProgressTracker:
             f"{self.progress_data['total_processed']} records processed"
         )
 
-    def log_error(self, error: str, offset: int):
+    def log_error(self, error: str, index: int):
         """Log an error during processing"""
         error_entry = {
             "timestamp": datetime.utcnow().isoformat(),
             "error": str(error),
-            "offset": offset,
+            "index": index,
         }
 
         if "errors" not in self.progress_data:
@@ -104,7 +104,7 @@ class ProgressTracker:
     def reset_progress(self):
         """Reset progress tracking"""
         self.progress_data = {
-            "last_offset": 0,
+            "last_index": 1,  # WealthX uses 1-based indexing
             "last_wealthx_id": None,
             "total_processed": 0,
             "last_batch_time": None,

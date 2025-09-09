@@ -30,10 +30,14 @@ class MongoDBClient:
         """Create necessary indexes for efficient operations"""
         try:
             # Index on WealthX ID for upserts
-            self.collection.create_index("wealthx_id", unique=True, sparse=True)
+            self.collection.create_index("ID", unique=True, sparse=True)
             # Index on created/updated timestamps
             self.collection.create_index("created_at")
             self.collection.create_index("updated_at")
+            # Additional useful indexes for WealthX data
+            self.collection.create_index("dossierState")
+            self.collection.create_index("dossierCategory")
+            self.collection.create_index([("lastName", 1), ("firstName", 1)])
             self.logger.info("Database indexes created/verified")
         except PyMongoError as e:
             self.logger.warning(f"Error creating indexes: {e}")
@@ -46,31 +50,31 @@ class MongoDBClient:
         except PyMongoError:
             return False
 
-    def bulk_upsert_profiles(self, profiles: List[Dict]) -> Dict[str, int]:
-        """Bulk upsert profiles with conflict resolution"""
-        if not profiles:
+    def bulk_upsert_profiles(self, dossiers: List[Dict]) -> Dict[str, int]:
+        """Bulk upsert dossiers with conflict resolution"""
+        if not dossiers:
             return {"inserted": 0, "updated": 0, "errors": 0}
 
         operations = []
         current_time = datetime.utcnow()
 
-        for profile in profiles:
+        for dossier in dossiers:
             # Add metadata
-            profile_data = {**profile, "updated_at": current_time}
+            dossier_data = {**dossier, "updated_at": current_time}
 
             # Set created_at only for new documents
-            if "created_at" not in profile_data:
-                profile_data["created_at"] = current_time
+            if "created_at" not in dossier_data:
+                dossier_data["created_at"] = current_time
 
             # Use WealthX ID as unique identifier
-            wealthx_id = profile.get("id") or profile.get("wealthx_id")
+            wealthx_id = dossier.get("ID")
             if not wealthx_id:
-                self.logger.warning("Profile missing WealthX ID, skipping")
+                self.logger.warning("Dossier missing WealthX ID, skipping")
                 continue
 
             operation = UpdateOne(
-                {"wealthx_id": wealthx_id},
-                {"$set": profile_data, "$setOnInsert": {"created_at": current_time}},
+                {"ID": wealthx_id},
+                {"$set": dossier_data, "$setOnInsert": {"created_at": current_time}},
                 upsert=True,
             )
             operations.append(operation)
@@ -103,7 +107,7 @@ class MongoDBClient:
 
         except PyMongoError as e:
             self.logger.error(f"MongoDB error during bulk upsert: {e}")
-            return {"inserted": 0, "updated": 0, "errors": len(profiles)}
+            return {"inserted": 0, "updated": 0, "errors": len(dossiers)}
 
     def get_total_documents(self) -> int:
         """Get total number of documents in collection"""
@@ -113,13 +117,11 @@ class MongoDBClient:
             self.logger.error(f"Error counting documents: {e}")
             return 0
 
-    def get_latest_wealthx_id(self) -> Optional[str]:
+    def get_latest_wealthx_id(self) -> Optional[int]:
         """Get the highest WealthX ID to resume from"""
         try:
-            doc = self.collection.find_one(
-                {}, {"wealthx_id": 1}, sort=[("wealthx_id", -1)]
-            )
-            return doc.get("wealthx_id") if doc else None
+            doc = self.collection.find_one({}, {"ID": 1}, sort=[("ID", -1)])
+            return doc.get("ID") if doc else None
         except PyMongoError as e:
             self.logger.error(f"Error finding latest WealthX ID: {e}")
             return None
@@ -130,7 +132,7 @@ class MongoDBClient:
             pipeline = [
                 {
                     "$group": {
-                        "_id": "$wealthx_id",
+                        "_id": "$ID",
                         "docs": {"$push": "$_id"},
                         "count": {"$sum": 1},
                     }

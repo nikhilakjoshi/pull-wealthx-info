@@ -37,8 +37,8 @@ cp .env.example .env
 nano .env  # or your preferred editor
 
 # Required: Add your WealthX API credentials
-WEALTHX_API_KEY=your_actual_api_key
-WEALTHX_API_SECRET=your_actual_api_secret
+WEALTHX_USERNAME=your_actual_username
+WEALTHX_PASSWORD=your_actual_password
 ```
 
 ### Step 3: Production Setup for 10-Day Run
