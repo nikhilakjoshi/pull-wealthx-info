@@ -26,11 +26,12 @@ class ProgressTracker:
             self.logger.warning(f"Could not load progress file: {e}")
 
         return {
-            "last_index": 1,  # WealthX uses 1-based indexing
-            "last_wealthx_id": None,
-            "total_processed": 0,
+            "last_processed_index": 0,  # WealthX uses 1-based indexing
+            "total_records": 0,
+            "records_processed": 0,
             "last_batch_time": None,
             "session_id": None,
+            "session_start": None,
             "batches_completed": 0,
             "errors": [],
         }
@@ -51,28 +52,43 @@ class ProgressTracker:
         self._save_progress()
         return session_id
 
+    def get_progress(self) -> Dict:
+        """Get current progress data"""
+        return self.progress_data
+
+    def update_total_records(self, total_records: int):
+        """Update the total records count"""
+        self.progress_data["total_records"] = total_records
+        self._save_progress()
+
     def get_resume_index(self) -> int:
         """Get the index to resume from (1-based)"""
-        return self.progress_data.get("last_index", 1)
+        return self.progress_data.get("last_processed_index", 0) + 1
 
     def update_progress(
-        self, current_index: int, batch_size: int, wealthx_id: Optional[int] = None
+        self,
+        last_processed_index: int,
+        records_processed: int,
+        session_start: Optional[str] = None,
     ):
-        """Update progress after successful batch"""
+        """Update progress after successful batch session"""
         self.progress_data.update(
             {
-                "last_index": current_index + batch_size,
-                "last_wealthx_id": wealthx_id,
-                "total_processed": self.progress_data["total_processed"] + batch_size,
+                "last_processed_index": last_processed_index,
+                "records_processed": records_processed,
                 "last_batch_time": datetime.utcnow().isoformat(),
-                "batches_completed": self.progress_data["batches_completed"] + 1,
+                "batches_completed": self.progress_data.get("batches_completed", 0) + 1,
             }
         )
+
+        if session_start:
+            self.progress_data["session_start"] = session_start
+
         self._save_progress()
 
         self.logger.info(
-            f"Progress updated: {self.progress_data['batches_completed']} batches, "
-            f"{self.progress_data['total_processed']} records processed"
+            f"Progress updated: {records_processed:,} total records processed, "
+            f"last index: {last_processed_index:,}"
         )
 
     def log_error(self, error: str, index: int):
@@ -93,8 +109,9 @@ class ProgressTracker:
         """Get processing statistics"""
         return {
             "batches_completed": self.progress_data.get("batches_completed", 0),
-            "total_processed": self.progress_data.get("total_processed", 0),
-            "last_offset": self.progress_data.get("last_offset", 0),
+            "records_processed": self.progress_data.get("records_processed", 0),
+            "last_processed_index": self.progress_data.get("last_processed_index", 0),
+            "total_records": self.progress_data.get("total_records", 0),
             "session_id": self.progress_data.get("session_id"),
             "session_start": self.progress_data.get("session_start"),
             "last_batch_time": self.progress_data.get("last_batch_time"),
@@ -104,11 +121,12 @@ class ProgressTracker:
     def reset_progress(self):
         """Reset progress tracking"""
         self.progress_data = {
-            "last_index": 1,  # WealthX uses 1-based indexing
-            "last_wealthx_id": None,
-            "total_processed": 0,
+            "last_processed_index": 0,
+            "total_records": 0,
+            "records_processed": 0,
             "last_batch_time": None,
             "session_id": None,
+            "session_start": None,
             "batches_completed": 0,
             "errors": [],
         }
@@ -127,7 +145,7 @@ class ProgressTracker:
             current_time = datetime.utcnow()
             elapsed = (current_time - start_time).total_seconds()
 
-            processed = self.progress_data["total_processed"]
+            processed = self.progress_data["records_processed"]
             remaining = total_records - processed
 
             if processed == 0 or elapsed == 0:

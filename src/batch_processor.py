@@ -13,10 +13,13 @@ load_dotenv()
 
 
 class BatchProcessor:
-    """Handles batch processing of WealthX data"""
+    """Handles batch processing of WealthX data with API call limits"""
 
     def __init__(self):
-        self.batch_size = int(os.getenv("BATCH_SIZE", 12000))
+        self.api_batch_size = int(os.getenv("API_BATCH_SIZE", 500))  # Per API call
+        self.processing_batch_size = int(
+            os.getenv("PROCESSING_BATCH_SIZE", 14000)
+        )  # Per session
         self.retry_delay = int(os.getenv("RETRY_DELAY", 60))
 
         self.wealthx_client = WealthXClient()
@@ -42,51 +45,160 @@ class BatchProcessor:
         self.logger.info("All service connections validated")
         return True
 
-    def process_batch(self, from_index: int, batch_size: Optional[int] = None) -> Dict:
-        """Process a single batch of records using fromIndex/toIndex"""
-        batch_size = batch_size or self.batch_size
-        to_index = from_index + batch_size - 1
+    def process_batch_session(self, max_batches: Optional[int] = None) -> Dict:
+        """
+        Process one batch session (multiple API calls up to processing_batch_size)
+        This is the main method for scheduled runs
+        """
+        from datetime import datetime
 
-        try:
-            # Fetch data from WealthX API
-            dossiers = self.wealthx_client.get_profiles_batch(from_index, to_index)
+        session_start_time = datetime.now()
+        progress = self.progress_tracker.get_progress()
 
-            if not dossiers:
-                self.logger.warning(
-                    f"No dossiers returned for range {from_index}-{to_index}"
+        # Determine starting index (WealthX uses 1-based indexing)
+        current_index = progress.get("last_processed_index", 0) + 1
+        total_records = progress.get("total_records", 0)
+
+        # Get total records if not known
+        if total_records == 0:
+            try:
+                total_records = self.wealthx_client.get_total_records()
+                self.progress_tracker.update_total_records(total_records)
+            except Exception as e:
+                self.logger.error(f"Failed to get total records: {e}")
+                return {"success": False, "error": str(e)}
+
+        session_records_processed = 0
+        session_records_target = self.processing_batch_size
+
+        # Limit by max_batches if specified (for testing)
+        if max_batches:
+            session_records_target = min(
+                session_records_target, max_batches * self.api_batch_size
+            )
+
+        self.logger.info(f"Starting batch session from index {current_index}")
+        self.logger.info(f"Target records for this session: {session_records_target}")
+
+        api_calls_made = 0
+
+        with tqdm(desc=f"Session Progress", total=session_records_target) as pbar:
+            while (
+                session_records_processed < session_records_target
+                and current_index <= total_records
+            ):
+
+                # Calculate end index for this API call
+                to_index = min(
+                    current_index + self.api_batch_size - 1,
+                    current_index
+                    + (session_records_target - session_records_processed)
+                    - 1,
+                    total_records,
                 )
-                return {"success": False, "records": 0, "error": "No data returned"}
 
-            # Store in MongoDB
-            result = self.mongo_client.bulk_upsert_profiles(dossiers)
+                if current_index > to_index:
+                    break
 
-            # Update progress - use the highest ID from the batch for resume capability
-            last_id = max(
-                (d.get("ID", 0) for d in dossiers if d.get("ID")), default=None
-            )
-            self.progress_tracker.update_progress(from_index, len(dossiers), last_id)
+                try:
+                    # Make API call
+                    self.logger.info(
+                        f"API call {api_calls_made + 1}: Fetching records {current_index} to {to_index}"
+                    )
+                    dossiers = self.wealthx_client.get_profiles_batch(
+                        current_index, to_index
+                    )
 
-            return {
-                "success": True,
-                "records": len(dossiers),
-                "inserted": result["inserted"],
-                "updated": result["updated"],
-                "errors": result["errors"],
-                "last_id": last_id,
-            }
+                    if not dossiers:
+                        self.logger.warning(
+                            f"No records returned for range {current_index}-{to_index}"
+                        )
+                        break
 
-        except Exception as e:
-            error_msg = (
-                f"Error processing batch from {from_index} to {to_index}: {str(e)}"
-            )
-            self.logger.error(error_msg)
-            self.progress_tracker.log_error(error_msg, from_index)
-            return {"success": False, "records": 0, "error": str(e)}
+                    # Store in MongoDB
+                    result = self.mongo_client.bulk_upsert_profiles(dossiers)
+                    records_in_batch = len(dossiers)
+
+                    self.logger.info(
+                        f"Stored {records_in_batch} dossiers (Inserted: {result['inserted']}, Updated: {result['updated']})"
+                    )
+
+                    # Update progress
+                    session_records_processed += records_in_batch
+                    current_index = to_index + 1
+                    api_calls_made += 1
+
+                    # Update progress tracker
+                    self.progress_tracker.update_progress(
+                        last_processed_index=to_index,
+                        records_processed=progress.get("records_processed", 0)
+                        + records_in_batch,
+                        session_start=session_start_time.isoformat(),
+                    )
+
+                    # Update progress bar
+                    pbar.update(records_in_batch)
+                    pbar.set_postfix(
+                        {
+                            "API Calls": api_calls_made,
+                            "Records": session_records_processed,
+                            "Last Index": to_index,
+                        }
+                    )
+
+                    # Small delay between API calls to be respectful
+                    time.sleep(1)
+
+                except Exception as e:
+                    self.logger.error(
+                        f"Error processing batch {current_index}-{to_index}: {e}"
+                    )
+                    # Move to next batch instead of failing entire session
+                    current_index += self.api_batch_size
+                    continue
+
+        session_end_time = datetime.now()
+        session_duration = (session_end_time - session_start_time).total_seconds()
+
+        # Calculate progress statistics
+        final_progress = self.progress_tracker.get_progress()
+        total_processed = final_progress.get("records_processed", 0)
+        completion_percentage = (
+            (total_processed / total_records * 100) if total_records > 0 else 0
+        )
+
+        result = {
+            "success": True,
+            "session_records_processed": session_records_processed,
+            "api_calls_made": api_calls_made,
+            "total_records_processed": total_processed,
+            "total_records": total_records,
+            "completion_percentage": round(completion_percentage, 2),
+            "session_duration_seconds": round(session_duration, 2),
+            "last_processed_index": current_index - 1,
+            "estimated_remaining_days": self._estimate_remaining_time(
+                total_processed, total_records
+            ),
+        }
+
+        self.logger.info(f"Batch session completed: {result}")
+        return result
+
+    def _estimate_remaining_time(self, processed: int, total: int) -> float:
+        """Estimate remaining days based on current progress"""
+        if processed <= 0:
+            return 10.0
+
+        runs_per_day = int(os.getenv("RUNS_PER_DAY", 3))
+        avg_per_run = self.processing_batch_size  # Expected records per run
+        remaining_records = total - processed
+        remaining_runs = remaining_records / max(1, avg_per_run)
+        return remaining_runs / runs_per_day
 
     def run_full_sync(
         self, resume: bool = True, max_batches: Optional[int] = None
     ) -> Dict:
-        """Run full synchronization of WealthX data"""
+        """Run full synchronization of WealthX data using batch sessions"""
         if not self.validate_connections():
             return {"success": False, "error": "Connection validation failed"}
 
@@ -94,97 +206,34 @@ class BatchProcessor:
         self.logger.info(f"Starting WealthX data sync (Session: {session_id})")
 
         try:
-            # Get total records available
-            total_records = self.wealthx_client.get_total_records()
-            self.logger.info(f"Total records available: {total_records:,}")
+            # Use the new batch session processor
+            result = self.process_batch_session(max_batches)
 
-            # Determine starting index (WealthX uses 1-based indexing)
-            if resume:
-                last_id = self.mongo_client.get_latest_wealthx_id()
-                start_index = (last_id + 1) if last_id else 1
+            if result["success"]:
+                # Get final statistics
+                stats = self.progress_tracker.get_statistics()
+                final_count = self.mongo_client.get_total_documents()
+
+                self.logger.info(
+                    f"Sync session completed - API calls: {result['api_calls_made']}, "
+                    f"Records processed: {result['session_records_processed']:,}, "
+                    f"Total in DB: {final_count:,}, "
+                    f"Progress: {result['completion_percentage']:.2f}%"
+                )
+
+                return {
+                    "success": True,
+                    "session_id": session_id,
+                    "api_calls_made": result["api_calls_made"],
+                    "session_records_processed": result["session_records_processed"],
+                    "total_records_processed": result["total_records_processed"],
+                    "total_in_database": final_count,
+                    "completion_percentage": result["completion_percentage"],
+                    "estimated_remaining_days": result["estimated_remaining_days"],
+                    "session_duration_seconds": result["session_duration_seconds"],
+                }
             else:
-                start_index = 1
-
-            if start_index > 1:
-                self.logger.info(f"Resuming from index: {start_index:,}")
-
-            # Calculate batches needed
-            remaining_records = total_records - start_index + 1
-            estimated_batches = max(
-                1, (remaining_records + self.batch_size - 1) // self.batch_size
-            )
-
-            if max_batches:
-                estimated_batches = min(estimated_batches, max_batches)
-                self.logger.info(f"Limited to {max_batches} batches")
-
-            self.logger.info(f"Estimated batches to process: {estimated_batches}")
-
-            # Process batches with progress bar
-            total_processed = 0
-            total_errors = 0
-
-            with tqdm(total=estimated_batches, desc="Processing batches") as pbar:
-                current_index = start_index
-                batch_count = 0
-
-                while current_index <= total_records and (
-                    not max_batches or batch_count < max_batches
-                ):
-                    # Calculate batch size (may be smaller for last batch)
-                    current_batch_size = min(
-                        self.batch_size, total_records - current_index + 1
-                    )
-
-                    # Process batch
-                    result = self.process_batch(current_index, current_batch_size)
-
-                    if result["success"]:
-                        total_processed += result["records"]
-                        pbar.set_postfix(
-                            {
-                                "Processed": f"{total_processed:,}",
-                                "Errors": total_errors,
-                                "LastID": result.get("last_id", "N/A"),
-                                "ETA": self.progress_tracker.calculate_eta(
-                                    total_records, self.batch_size
-                                )
-                                or "N/A",
-                            }
-                        )
-                    else:
-                        total_errors += 1
-                        self.logger.error(f"Batch failed: {result.get('error')}")
-
-                        # Wait before retrying or continuing
-                        time.sleep(self.retry_delay)
-
-                    current_index += current_batch_size
-                    batch_count += 1
-                    pbar.update(1)
-
-                    # Small delay to avoid overwhelming the API
-                    time.sleep(1)
-
-            # Final statistics
-            stats = self.progress_tracker.get_statistics()
-            final_count = self.mongo_client.get_total_documents()
-
-            self.logger.info(
-                f"Sync completed - Batches: {stats['batches_completed']}, "
-                f"Records processed: {stats['total_processed']:,}, "
-                f"Total in DB: {final_count:,}, "
-                f"Errors: {stats['error_count']}"
-            )
-
-            return {
-                "success": True,
-                "session_id": session_id,
-                "batches_processed": stats["batches_completed"],
-                "records_processed": stats["total_processed"],
-                "total_in_database": final_count,
-                "errors": stats["error_count"],
-            }
+                return result
 
         except Exception as e:
             self.logger.error(f"Fatal error during sync: {str(e)}")

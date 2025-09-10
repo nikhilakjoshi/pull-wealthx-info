@@ -15,7 +15,7 @@ class MongoDBClient:
     def __init__(self):
         self.uri = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
         self.database_name = os.getenv("MONGO_DATABASE", "wealthx_data")
-        self.collection_name = os.getenv("MONGO_COLLECTION", "profiles")
+        self.collection_name = os.getenv("MONGO_COLLECTION", "dossiers")
 
         self.client = MongoClient(self.uri)
         self.db = self.client[self.database_name]
@@ -59,12 +59,15 @@ class MongoDBClient:
         current_time = datetime.utcnow()
 
         for dossier in dossiers:
-            # Add metadata
-            dossier_data = {**dossier, "updated_at": current_time}
+            # Clean the dossier data - remove any existing timestamp fields
+            clean_dossier = {
+                k: v
+                for k, v in dossier.items()
+                if k not in ["created_at", "updated_at"]
+            }
 
-            # Set created_at only for new documents
-            if "created_at" not in dossier_data:
-                dossier_data["created_at"] = current_time
+            # Add our metadata
+            dossier_data = {**clean_dossier, "updated_at": current_time}
 
             # Use WealthX ID as unique identifier
             wealthx_id = dossier.get("ID")

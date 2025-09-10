@@ -49,9 +49,9 @@ def main():
     )
 
     parser.add_argument(
-        "--batch-size",
+        "--processing-batch-size",
         type=int,
-        help="Number of records to process per batch (default: from .env or 12000)",
+        help="Number of records to process per session (default: from .env or 14000)",
     )
 
     parser.add_argument(
@@ -106,9 +106,11 @@ def main():
 
     try:
         # Override batch size if provided
-        if args.batch_size:
-            processor.batch_size = args.batch_size
-            logger.info(f"Using custom batch size: {args.batch_size}")
+        if args.processing_batch_size:
+            processor.processing_batch_size = args.processing_batch_size
+            logger.info(
+                f"Using custom processing batch size: {args.processing_batch_size}"
+            )
 
         # Handle different operations
         if args.status:
@@ -117,8 +119,13 @@ def main():
             print(f"Database Records: {status['database_records']:,}")
             print(f"Session ID: {status['session_stats'].get('session_id', 'None')}")
             print(f"Batches Completed: {status['session_stats']['batches_completed']}")
-            print(f"Total Processed: {status['session_stats']['total_processed']:,}")
-            print(f"Last Offset: {status['session_stats']['last_offset']:,}")
+            print(
+                f"Records Processed: {status['session_stats']['records_processed']:,}"
+            )
+            print(
+                f"Last Processed Index: {status['session_stats']['last_processed_index']:,}"
+            )
+            print(f"Total Records: {status['session_stats']['total_records']:,}")
             print(f"Errors: {status['session_stats']['error_count']}")
             print(
                 f"WealthX API: {'✓' if status['connections']['wealthx_api'] else '✗'}"
@@ -137,7 +144,8 @@ def main():
 
         # Run main sync process
         logger.info("Starting WealthX data synchronization...")
-        logger.info(f"Batch size: {processor.batch_size:,}")
+        logger.info(f"API batch size: {processor.api_batch_size:,}")
+        logger.info(f"Processing batch size: {processor.processing_batch_size:,}")
         logger.info(f"Resume mode: {args.resume}")
 
         if args.max_batches:
@@ -150,10 +158,12 @@ def main():
         if result["success"]:
             print("\n=== Synchronization Completed Successfully ===")
             print(f"Session ID: {result['session_id']}")
-            print(f"Batches Processed: {result['batches_processed']}")
-            print(f"Records Processed: {result['records_processed']:,}")
+            print(f"API Calls Made: {result['api_calls_made']}")
+            print(f"Session Records: {result['session_records_processed']:,}")
+            print(f"Total Records Processed: {result['total_records_processed']:,}")
             print(f"Total in Database: {result['total_in_database']:,}")
-            print(f"Errors: {result['errors']}")
+            print(f"Completion: {result['completion_percentage']:.2f}%")
+            print(f"Est. Remaining Days: {result['estimated_remaining_days']:.1f}")
         else:
             print(f"\n=== Synchronization Failed ===")
             print(f"Error: {result.get('error')}")
