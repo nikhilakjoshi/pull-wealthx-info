@@ -81,11 +81,14 @@ class BatchProcessor:
         self.logger.info(f"Target records for this session: {session_records_target}")
 
         api_calls_made = 0
+        consecutive_empty_batches = 0
+        max_consecutive_skips = 20
 
         with tqdm(desc=f"Session Progress", total=session_records_target) as pbar:
             while (
                 session_records_processed < session_records_target
                 and current_index <= total_records
+                and consecutive_empty_batches < max_consecutive_skips
             ):
 
                 # Calculate end index for this API call
@@ -110,11 +113,29 @@ class BatchProcessor:
                     )
 
                     if not dossiers:
+                        consecutive_empty_batches += 1
                         self.logger.warning(
-                            f"No records returned for range {current_index}-{to_index}"
+                            f"No records returned for range {current_index}-{to_index}. "
+                            f"Empty batch {consecutive_empty_batches}/{max_consecutive_skips}. Skipping to next batch."
                         )
-                        break
+                        # Skip to next batch instead of ending session
+                        current_index = to_index + 1
+                        api_calls_made += 1
+                        
+                        # Update progress tracker to save our position
+                        self.progress_tracker.update_progress(
+                            last_processed_index=to_index,
+                            records_processed=progress.get("records_processed", 0),
+                            session_start=session_start_time.isoformat(),
+                        )
+                        
+                        # Small delay before next API call
+                        time.sleep(1)
+                        continue
 
+                    # Reset consecutive empty batches counter since we found data
+                    consecutive_empty_batches = 0
+                    
                     # Store in MongoDB
                     result = self.mongo_client.bulk_upsert_profiles(dossiers)
                     records_in_batch = len(dossiers)
@@ -167,6 +188,13 @@ class BatchProcessor:
             (total_processed / total_records * 100) if total_records > 0 else 0
         )
 
+        # Determine end reason
+        end_reason = "target_reached"
+        if consecutive_empty_batches >= max_consecutive_skips:
+            end_reason = "max_skips_reached"
+        elif current_index > total_records:
+            end_reason = "end_of_data"
+
         result = {
             "success": True,
             "session_records_processed": session_records_processed,
@@ -176,12 +204,17 @@ class BatchProcessor:
             "completion_percentage": round(completion_percentage, 2),
             "session_duration_seconds": round(session_duration, 2),
             "last_processed_index": current_index - 1,
+            "consecutive_empty_batches": consecutive_empty_batches,
+            "end_reason": end_reason,
             "estimated_remaining_days": self._estimate_remaining_time(
                 total_processed, total_records
             ),
         }
 
         self.logger.info(f"Batch session completed: {result}")
+        if consecutive_empty_batches >= max_consecutive_skips:
+            self.logger.warning(f"Session ended due to {consecutive_empty_batches} consecutive empty batches")
+        
         return result
 
     def _estimate_remaining_time(self, processed: int, total: int) -> float:
