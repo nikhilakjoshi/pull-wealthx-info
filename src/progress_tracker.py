@@ -27,7 +27,8 @@ class ProgressTracker:
 
         return {
             "last_processed_index": 0,  # WealthX uses 1-based indexing
-            "total_records": 0,
+            "total_records": 0,  # Deprecated: ID range estimate
+            "target_db_records": 2500000,  # Target: actual DB record count
             "records_processed": 0,
             "last_batch_time": None,
             "session_id": None,
@@ -54,10 +55,19 @@ class ProgressTracker:
 
     def get_progress(self) -> Dict:
         """Get current progress data"""
+        # Ensure target_db_records exists for backward compatibility
+        if "target_db_records" not in self.progress_data:
+            self.progress_data["target_db_records"] = 2500000
+            self._save_progress()
         return self.progress_data
 
+    def update_target_db_records(self, target_db_records: int):
+        """Update the target database records count"""
+        self.progress_data["target_db_records"] = target_db_records
+        self._save_progress()
+
     def update_total_records(self, total_records: int):
-        """Update the total records count"""
+        """Update the total records count (deprecated, kept for compatibility)"""
         self.progress_data["total_records"] = total_records
         self._save_progress()
 
@@ -111,7 +121,8 @@ class ProgressTracker:
             "batches_completed": self.progress_data.get("batches_completed", 0),
             "records_processed": self.progress_data.get("records_processed", 0),
             "last_processed_index": self.progress_data.get("last_processed_index", 0),
-            "total_records": self.progress_data.get("total_records", 0),
+            "total_records": self.progress_data.get("total_records", 0),  # Deprecated
+            "target_db_records": self.progress_data.get("target_db_records", 2500000),
             "session_id": self.progress_data.get("session_id"),
             "session_start": self.progress_data.get("session_start"),
             "last_batch_time": self.progress_data.get("last_batch_time"),
@@ -122,7 +133,8 @@ class ProgressTracker:
         """Reset progress tracking"""
         self.progress_data = {
             "last_processed_index": 0,
-            "total_records": 0,
+            "total_records": 0,  # Deprecated
+            "target_db_records": 2500000,  # Target DB record count
             "records_processed": 0,
             "last_batch_time": None,
             "session_id": None,

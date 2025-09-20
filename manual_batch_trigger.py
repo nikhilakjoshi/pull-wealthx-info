@@ -26,22 +26,22 @@ def setup_logging(log_level: str = "INFO", quiet: bool = False) -> None:
     """Configure logging for the script"""
     if quiet:
         log_level = "ERROR"
-    
+
     log_dir = "logs"
     os.makedirs(log_dir, exist_ok=True)
-    
+
     log_file = os.path.join(log_dir, "manual_batch.log")
-    
+
     handlers = [logging.FileHandler(log_file)]
     if not quiet:
         handlers.append(logging.StreamHandler(sys.stdout))
-    
+
     logging.basicConfig(
         level=getattr(logging, log_level.upper()),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=handlers,
     )
-    
+
     # Reduce noise from external libraries
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("requests").setLevel(logging.WARNING)
@@ -51,45 +51,52 @@ def setup_logging(log_level: str = "INFO", quiet: bool = False) -> None:
 def print_status(processor: BatchProcessor) -> None:
     """Print current status in a formatted way"""
     status = processor.get_status()
-    
-    print("\n" + "="*50)
+
+    print("\n" + "=" * 50)
     print("     WealthX Data Puller - Current Status")
-    print("="*50)
+    print("=" * 50)
     print(f"Database Records:     {status['database_records']:,}")
     print(f"Session ID:           {status['session_stats'].get('session_id', 'None')}")
     print(f"Batches Completed:    {status['session_stats']['batches_completed']}")
     print(f"Records Processed:    {status['session_stats']['records_processed']:,}")
     print(f"Last Index:           {status['session_stats']['last_processed_index']:,}")
-    print(f"Total Records:        {status['session_stats']['total_records']:,}")
+    print(f"Target DB Records:    {status['session_stats']['target_db_records']:,}")
     print(f"Errors:               {status['session_stats']['error_count']}")
-    print(f"WealthX API:          {'✓ Connected' if status['connections']['wealthx_api'] else '✗ Failed'}")
-    print(f"MongoDB:              {'✓ Connected' if status['connections']['mongodb'] else '✗ Failed'}")
-    
-    if status['session_stats']['total_records'] > 0:
-        completion = (status['session_stats']['records_processed'] / status['session_stats']['total_records']) * 100
+    print(
+        f"WealthX API:          {'✓ Connected' if status['connections']['wealthx_api'] else '✗ Failed'}"
+    )
+    print(
+        f"MongoDB:              {'✓ Connected' if status['connections']['mongodb'] else '✗ Failed'}"
+    )
+
+    target_db_records = status["session_stats"]["target_db_records"]
+    if target_db_records > 0:
+        completion = (
+            status["session_stats"]["records_processed"] / target_db_records
+        ) * 100
         print(f"Completion:           {completion:.2f}%")
-    
-    print("="*50)
+
+    print("=" * 50)
 
 
 def run_batch_session(
-    processor: BatchProcessor, 
+    processor: BatchProcessor,
     max_batches: Optional[int] = None,
-    processing_batch_size: Optional[int] = None
+    processing_batch_size: Optional[int] = None,
 ) -> dict:
     """Run a single batch session"""
-    
+
     if processing_batch_size:
         processor.processing_batch_size = processing_batch_size
         print(f"Using custom processing batch size: {processing_batch_size:,}")
-    
+
     print(f"\nStarting batch session...")
     print(f"API batch size: {processor.api_batch_size}")
     print(f"Processing batch size: {processor.processing_batch_size:,}")
-    
+
     if max_batches:
         print(f"Limited to {max_batches} API batches")
-    
+
     result = processor.process_batch_session(max_batches=max_batches)
     return result
 
@@ -116,9 +123,15 @@ Examples:
   # Run full sync (multiple sessions until complete)
   python manual_batch_trigger.py --full-sync
   
+  # Set target database records count
+  python manual_batch_trigger.py --set-target-records 2500000
+  
+  # Refresh total records count from API
+  python manual_batch_trigger.py --refresh-total
+  
   # Reset progress (use with caution)
   python manual_batch_trigger.py --reset-progress
-        """
+        """,
     )
 
     parser.add_argument(
@@ -164,6 +177,18 @@ Examples:
     )
 
     parser.add_argument(
+        "--set-target-records",
+        type=int,
+        help="Set the target database records count (e.g., 2500000)",
+    )
+
+    parser.add_argument(
+        "--refresh-total",
+        action="store_true",
+        help="Refresh the total records count from WealthX API",
+    )
+
+    parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default=os.getenv("LOG_LEVEL", "INFO"),
@@ -186,11 +211,28 @@ Examples:
     processor = BatchProcessor()
 
     try:
+        # Handle set target records
+        if args.set_target_records:
+            print(f"🎯 Setting target database records to: {args.set_target_records:,}")
+            processor.progress_tracker.update_target_db_records(args.set_target_records)
+            print("✅ Target database records updated")
+            return
+
+        # Handle refresh total records
+        if args.refresh_total:
+            print("🔄 Refreshing total records count from WealthX API...")
+            try:
+                total_records = processor.refresh_total_records()
+                print(f"✅ Total records updated to: {total_records:,}")
+            except Exception as e:
+                print(f"❌ Failed to refresh total records: {e}")
+            return
+
         # Handle reset progress
         if args.reset_progress:
             print("⚠️  WARNING: This will reset all progress tracking!")
             confirmation = input("Type 'YES' to confirm: ")
-            if confirmation == 'YES':
+            if confirmation == "YES":
                 processor.progress_tracker.reset_progress()
                 logger.info("Progress tracking has been reset")
                 print("✅ Progress tracking has been reset")
@@ -225,16 +267,15 @@ Examples:
         if args.full_sync:
             print("\n🚀 Starting FULL synchronization...")
             print("This will run multiple sessions until all data is processed.")
-            
+
             result = processor.run_full_sync(
-                resume=not args.no_resume,
-                max_batches=args.max_api_batches
+                resume=not args.no_resume, max_batches=args.max_api_batches
             )
 
             if result["success"]:
-                print("\n" + "="*50)
+                print("\n" + "=" * 50)
                 print("     FULL SYNCHRONIZATION COMPLETED")
-                print("="*50)
+                print("=" * 50)
                 print(f"Session ID:           {result['session_id']}")
                 print(f"API Calls Made:       {result['api_calls_made']}")
                 print(f"Session Records:      {result['session_records_processed']:,}")
@@ -242,9 +283,11 @@ Examples:
                 print(f"Total in Database:    {result['total_in_database']:,}")
                 print(f"Completion:           {result['completion_percentage']:.2f}%")
                 print(f"Est. Remaining Days:  {result['estimated_remaining_days']:.1f}")
-                if result.get('consecutive_empty_batches', 0) > 0:
-                    print(f"Empty Batches Skipped: {result['consecutive_empty_batches']}")
-                print("="*50)
+                if result.get("consecutive_empty_batches", 0) > 0:
+                    print(
+                        f"Empty Batches Skipped: {result['consecutive_empty_batches']}"
+                    )
+                print("=" * 50)
             else:
                 print(f"\n❌ Full synchronization failed: {result.get('error')}")
                 sys.exit(1)
@@ -252,27 +295,33 @@ Examples:
         else:
             # Run single batch session
             print("\n🚀 Starting batch session...")
-            
+
             result = run_batch_session(
                 processor,
                 max_batches=args.max_api_batches,
-                processing_batch_size=args.processing_batch_size
+                processing_batch_size=args.processing_batch_size,
             )
 
             if result["success"]:
-                print("\n" + "="*50)
+                print("\n" + "=" * 50)
                 print("     BATCH SESSION COMPLETED")
-                print("="*50)
+                print("=" * 50)
                 print(f"Session Records:      {result['session_records_processed']:,}")
                 print(f"API Calls Made:       {result['api_calls_made']}")
                 print(f"Total Processed:      {result['total_records_processed']:,}")
                 print(f"Completion:           {result['completion_percentage']:.2f}%")
                 print(f"Est. Remaining Days:  {result['estimated_remaining_days']:.1f}")
-                print(f"Session Duration:     {result['session_duration_seconds']:.1f}s")
-                if result.get('consecutive_empty_batches', 0) > 0:
-                    print(f"Empty Batches Skipped: {result['consecutive_empty_batches']}")
-                    print(f"End Reason:           {result.get('end_reason', 'unknown')}")
-                print("="*50)
+                print(
+                    f"Session Duration:     {result['session_duration_seconds']:.1f}s"
+                )
+                if result.get("consecutive_empty_batches", 0) > 0:
+                    print(
+                        f"Empty Batches Skipped: {result['consecutive_empty_batches']}"
+                    )
+                    print(
+                        f"End Reason:           {result.get('end_reason', 'unknown')}"
+                    )
+                print("=" * 50)
             else:
                 print(f"\n❌ Batch session failed: {result.get('error')}")
                 sys.exit(1)

@@ -28,6 +28,17 @@ class BatchProcessor:
 
         self.logger = logging.getLogger(__name__)
 
+    def refresh_total_records(self) -> int:
+        """Manually refresh the total records count from the API"""
+        try:
+            total_records = self.wealthx_client.get_total_records()
+            self.progress_tracker.update_total_records(total_records)
+            self.logger.info(f"Refreshed total records count: {total_records:,}")
+            return total_records
+        except Exception as e:
+            self.logger.error(f"Failed to refresh total records: {e}")
+            raise
+
     def validate_connections(self) -> bool:
         """Validate all service connections"""
         self.logger.info("Validating service connections...")
@@ -57,16 +68,36 @@ class BatchProcessor:
 
         # Determine starting index (WealthX uses 1-based indexing)
         current_index = progress.get("last_processed_index", 0) + 1
-        total_records = progress.get("total_records", 0)
 
-        # Get total records if not known
-        if total_records == 0:
-            try:
-                total_records = self.wealthx_client.get_total_records()
-                self.progress_tracker.update_total_records(total_records)
-            except Exception as e:
-                self.logger.error(f"Failed to get total records: {e}")
-                return {"success": False, "error": str(e)}
+        # Target database records (goal: 2-2.5 million actual records)
+        target_db_records = progress.get("target_db_records", 2500000)
+
+        # Current records in database
+        current_db_records = progress.get("records_processed", 0)
+
+        # Check if we've reached our target database record count
+        if current_db_records >= target_db_records:
+            self.logger.info(
+                f"Target database record count reached: {current_db_records:,} >= {target_db_records:,}"
+            )
+            return {
+                "success": True,
+                "session_records_processed": 0,
+                "api_calls_made": 0,
+                "total_records_processed": current_db_records,
+                "target_db_records": target_db_records,
+                "completion_percentage": 100.0,
+                "session_duration_seconds": 0.0,
+                "last_processed_index": current_index - 1,
+                "consecutive_empty_batches": 0,
+                "end_reason": "target_db_records_reached",
+                "estimated_remaining_days": 0.0,
+            }
+
+        # Set a high ID range limit (we'll discover the actual end through empty batches)
+        id_range_limit = max(
+            current_index + 500000, 10000000
+        )  # Allow for plenty of ID gaps
 
         session_records_processed = 0
         session_records_target = self.processing_batch_size
@@ -79,17 +110,21 @@ class BatchProcessor:
 
         self.logger.info(f"Starting batch session from index {current_index}")
         self.logger.info(f"Target records for this session: {session_records_target}")
+        self.logger.info(
+            f"Current DB records: {current_db_records:,} / Target: {target_db_records:,}"
+        )
 
         api_calls_made = 0
         consecutive_empty_batches = 0
-        max_consecutive_skips = 20
+        max_consecutive_skips = 50  # Increased since we're scanning a larger ID range
 
         with tqdm(desc=f"Session Progress", total=session_records_target) as pbar:
             while (
                 session_records_processed < session_records_target
-                and current_index <= total_records
                 and consecutive_empty_batches < max_consecutive_skips
             ):
+                # No need to check ID range limits - we'll scan until we find the actual end
+                # through consecutive empty batches
 
                 # Calculate end index for this API call
                 to_index = min(
@@ -97,7 +132,6 @@ class BatchProcessor:
                     current_index
                     + (session_records_target - session_records_processed)
                     - 1,
-                    total_records,
                 )
 
                 if current_index > to_index:
@@ -121,21 +155,21 @@ class BatchProcessor:
                         # Skip to next batch instead of ending session
                         current_index = to_index + 1
                         api_calls_made += 1
-                        
+
                         # Update progress tracker to save our position
                         self.progress_tracker.update_progress(
                             last_processed_index=to_index,
                             records_processed=progress.get("records_processed", 0),
                             session_start=session_start_time.isoformat(),
                         )
-                        
+
                         # Small delay before next API call
                         time.sleep(1)
                         continue
 
                     # Reset consecutive empty batches counter since we found data
                     consecutive_empty_batches = 0
-                    
+
                     # Store in MongoDB
                     result = self.mongo_client.bulk_upsert_profiles(dossiers)
                     records_in_batch = len(dossiers)
@@ -150,12 +184,21 @@ class BatchProcessor:
                     api_calls_made += 1
 
                     # Update progress tracker
+                    updated_total_processed = (
+                        progress.get("records_processed", 0) + records_in_batch
+                    )
                     self.progress_tracker.update_progress(
                         last_processed_index=to_index,
-                        records_processed=progress.get("records_processed", 0)
-                        + records_in_batch,
+                        records_processed=updated_total_processed,
                         session_start=session_start_time.isoformat(),
                     )
+
+                    # Check if we've reached the target database record count
+                    if updated_total_processed >= target_db_records:
+                        self.logger.info(
+                            f"Target database record count reached: {updated_total_processed:,} >= {target_db_records:,}"
+                        )
+                        break
 
                     # Update progress bar
                     pbar.update(records_in_batch)
@@ -184,37 +227,45 @@ class BatchProcessor:
         # Calculate progress statistics
         final_progress = self.progress_tracker.get_progress()
         total_processed = final_progress.get("records_processed", 0)
+        target_db_records = final_progress.get("target_db_records", 2500000)
         completion_percentage = (
-            (total_processed / total_records * 100) if total_records > 0 else 0
+            (total_processed / target_db_records * 100) if target_db_records > 0 else 0
         )
 
         # Determine end reason
-        end_reason = "target_reached"
+        end_reason = "session_target_reached"
         if consecutive_empty_batches >= max_consecutive_skips:
-            end_reason = "max_skips_reached"
-        elif current_index > total_records:
-            end_reason = "end_of_data"
+            end_reason = "max_empty_batches_reached"
+            self.logger.info(
+                f"Stopping due to {consecutive_empty_batches} consecutive empty batches at index {current_index-1}"
+            )
+        elif total_processed >= target_db_records:
+            end_reason = "target_db_records_reached"
+        elif session_records_processed >= session_records_target:
+            end_reason = "session_target_reached"
 
         result = {
             "success": True,
             "session_records_processed": session_records_processed,
             "api_calls_made": api_calls_made,
             "total_records_processed": total_processed,
-            "total_records": total_records,
+            "target_db_records": target_db_records,
             "completion_percentage": round(completion_percentage, 2),
             "session_duration_seconds": round(session_duration, 2),
             "last_processed_index": current_index - 1,
             "consecutive_empty_batches": consecutive_empty_batches,
             "end_reason": end_reason,
             "estimated_remaining_days": self._estimate_remaining_time(
-                total_processed, total_records
+                total_processed, target_db_records
             ),
         }
 
         self.logger.info(f"Batch session completed: {result}")
         if consecutive_empty_batches >= max_consecutive_skips:
-            self.logger.warning(f"Session ended due to {consecutive_empty_batches} consecutive empty batches")
-        
+            self.logger.warning(
+                f"Session ended due to {consecutive_empty_batches} consecutive empty batches"
+            )
+
         return result
 
     def _estimate_remaining_time(self, processed: int, total: int) -> float:
